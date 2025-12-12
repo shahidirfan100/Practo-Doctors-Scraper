@@ -395,7 +395,6 @@ await Actor.main(async () => {
         proxyConfiguration,
         useSessionPool: true,
         persistCookiesPerSession: true,
-        maxSessions: Math.max(10, maxConcurrency * 3), // More sessions for rotation
         autoscaledPoolOptions: {
             desiredConcurrency: maxConcurrency,
             minConcurrency: Math.min(2, maxConcurrency),
