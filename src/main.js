@@ -22,11 +22,18 @@ await Actor.main(async () => {
     const resultsWanted = Number.isFinite(+resultsWantedRaw) && +resultsWantedRaw > 0 ? +resultsWantedRaw : 100;
     const maxPages = Number.isFinite(+maxPagesRaw) && +maxPagesRaw > 0 ? +maxPagesRaw : 10;
 
+    const normalizeUrlLike = (value) => {
+        if (!value) return null;
+        if (typeof value === 'string') return value.trim();
+        if (typeof value === 'object' && typeof value.url === 'string') return value.url.trim();
+        return null;
+    };
+
     const startFromInput = [];
-    if (Array.isArray(startUrls) && startUrls.length) startFromInput.push(...startUrls);
-    if (startUrl) startFromInput.push(startUrl);
-    if (url) startFromInput.push(url);
-    if (!startFromInput.length) {
+    if (Array.isArray(startUrls) && startUrls.length) startFromInput.push(...startUrls.map(normalizeUrlLike).filter(Boolean));
+    if (startUrl) startFromInput.push(normalizeUrlLike(startUrl));
+    if (url) startFromInput.push(normalizeUrlLike(url));
+    if (!startFromInput.filter(Boolean).length) {
         const base = `https://www.practo.com/${city}/${speciality}`;
         startFromInput.push(locality ? `${base}/${locality}` : base);
     }
@@ -171,6 +178,16 @@ await Actor.main(async () => {
         return experienceOk && ratingOk;
     });
 
+    const makePageUrl = (currentUrl, page) => {
+        try {
+            const urlObj = new URL(currentUrl);
+            urlObj.searchParams.set('page', String(page));
+            return urlObj.toString();
+        } catch {
+            return null;
+        }
+    };
+
     const findNextPageUrl = ($, currentUrl, currentPage) => {
         const relNext = $('a[rel="next"]').attr('href');
         if (relNext) return toAbsoluteUrl(relNext);
@@ -189,10 +206,13 @@ await Actor.main(async () => {
         const nextHigher = anyHigher.find((item) => item.page > currentPage);
         if (nextHigher) return toAbsoluteUrl(nextHigher.href);
 
+        const constructed = makePageUrl(currentUrl, currentPage + 1);
+        if (constructed) return constructed;
+
         return null;
     };
 
-    const fetchDoctorDetail = async (doctor) => {
+    const fetchDoctorDetail = async (doctor, { proxyUrl, cookieJar }) => {
         if (!doctor.url) return doctor;
         if (detailCache.has(doctor.url)) {
             return { ...doctor, ...detailCache.get(doctor.url) };
@@ -202,8 +222,9 @@ await Actor.main(async () => {
             const response = await gotScraping({
                 url: doctor.url,
                 headers: defaultHeaders,
-                proxyUrl: await proxyConfiguration.newUrl(),
-                timeout: { request: 30000 },
+                proxyUrl,
+                cookieJar,
+                timeout: { request: 20000 },
             });
             const $$ = cheerioLoad(response.body);
             const description = clean($$('p.c-profile__description').first().text());
@@ -223,14 +244,39 @@ await Actor.main(async () => {
         }
     };
 
+    const mapWithConcurrency = async (items, concurrency, mapper) => {
+        const results = new Array(items.length);
+        let nextIndex = 0;
+        const workers = new Array(Math.min(concurrency, items.length)).fill(0).map(async () => {
+            while (true) {
+                const index = nextIndex;
+                nextIndex += 1;
+                if (index >= items.length) return;
+                results[index] = await mapper(items[index], index);
+            }
+        });
+        await Promise.all(workers);
+        return results;
+    };
+
     const crawler = new CheerioCrawler({
         proxyConfiguration,
-        maxConcurrency: 5,
-        maxRequestRetries: 2,
-        requestHandlerTimeoutSecs: 45,
-        requestHandler: async ({ request, $ }) => {
+        useSessionPool: true,
+        persistCookiesPerSession: true,
+        maxConcurrency: 3,
+        maxRequestRetries: 4,
+        requestHandlerTimeoutSecs: 180,
+        failedRequestHandler: async ({ request }, error) => {
+            log.warning(`Request failed: ${request.url} (${error?.message || error})`);
+        },
+        requestHandler: async ({ request, $, response, session, proxyInfo }) => {
             const pageNo = request.userData.page ?? 1;
-            log.info(`Processing page ${pageNo}: ${request.url}`);
+            log.info(`Processing page ${pageNo}: ${request.url} (status ${response?.statusCode ?? 'n/a'})`);
+
+            if (!$) {
+                log.warning('Missing Cheerio context ($). Skipping this page.');
+                return;
+            }
 
             const jsonDocs = parseJsonLdDoctors($);
             if (jsonDocs.length) {
@@ -245,9 +291,9 @@ await Actor.main(async () => {
             }
 
             const merged = mergeDoctors(jsonDocs, htmlDocs).map((doc) => ({
+                ...doc,
                 city: doc.city || city,
                 speciality: doc.speciality || speciality,
-                ...doc,
             }));
 
             const filtered = applyFilters(merged).filter((doc) => {
@@ -260,16 +306,14 @@ await Actor.main(async () => {
 
             const remaining = resultsWanted - saved;
             const toEnrich = filtered.slice(0, Math.max(0, remaining));
-            const batch = [];
-
-            for (const doc of toEnrich) {
+            const proxyUrl = proxyInfo?.url;
+            const cookieJar = session?.cookieJar;
+            const batch = await mapWithConcurrency(toEnrich, 3, async (doc) => {
                 if (!doc.description || !doc.profileImage) {
-                    const enriched = await fetchDoctorDetail(doc);
-                    batch.push(enriched);
-                } else {
-                    batch.push(doc);
+                    return fetchDoctorDetail(doc, { proxyUrl, cookieJar });
                 }
-            }
+                return doc;
+            });
 
             if (batch.length) {
                 await Actor.pushData(batch);
@@ -279,17 +323,12 @@ await Actor.main(async () => {
                 log.debug('No new doctors to save from this page');
             }
 
-            const hasResults = jsonDocs.length || htmlDocs.length;
             if (saved >= resultsWanted) {
                 log.info('Reached requested result count, stopping pagination');
                 return;
             }
             if (pageNo >= maxPages) {
                 log.info('Reached max_pages guard, stopping pagination');
-                return;
-            }
-            if (!hasResults) {
-                log.info('No results detected, stopping pagination to stay stealthy');
                 return;
             }
 
