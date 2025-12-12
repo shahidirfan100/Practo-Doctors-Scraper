@@ -1,6 +1,9 @@
 import { Actor, log } from 'apify';
 import { CheerioCrawler } from 'crawlee';
+import { gotScraping } from 'got-scraping';
+import { load as cheerioLoad } from 'cheerio';
 
+// Practo doctors scraper: JSON API first, HTML fallback, profile detail enrichment (stealth-optimized).
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
     const {
@@ -16,12 +19,14 @@ await Actor.main(async () => {
         minExperience = 0,
         minRating = 0,
         fetchDetails = true,
-        maxConcurrency: maxConcurrencyRaw = 15,
+        maxConcurrency: maxConcurrencyRaw = 10, // default tuned for speed + stealth
     } = input;
 
     const resultsWanted = Number.isFinite(+resultsWantedRaw) && +resultsWantedRaw > 0 ? +resultsWantedRaw : 100;
     const maxPages = Number.isFinite(+maxPagesRaw) && +maxPagesRaw > 0 ? +maxPagesRaw : 10;
-    const maxConcurrency = Number.isFinite(+maxConcurrencyRaw) && +maxConcurrencyRaw > 0 ? Math.min(50, +maxConcurrencyRaw) : 10;
+    const maxConcurrency = Number.isFinite(+maxConcurrencyRaw) && +maxConcurrencyRaw > 0
+        ? Math.min(30, +maxConcurrencyRaw)
+        : 10;
 
     const normalizeUrlLike = (value) => {
         if (!value) return null;
@@ -82,6 +87,7 @@ await Actor.main(async () => {
         return experienceOk && ratingOk;
     });
 
+    // Parse doctors from JSON-LD blobs.
     const parseJsonLdDoctors = ($) => {
         const doctors = [];
         $('script[type="application/ld+json"]').each((_, el) => {
@@ -120,6 +126,7 @@ await Actor.main(async () => {
         return doctors;
     };
 
+    // Parse doctors from listing HTML cards.
     const parseHtmlDoctors = ($) => {
         const doctors = [];
         const cards = $('[data-qa-id="doctor_card"], .listing-doctor-card, .doctor-card');
@@ -159,6 +166,7 @@ await Actor.main(async () => {
         return doctors;
     };
 
+    // Merge two doctor lists, preferring primary fields.
     const mergeDoctors = (primary = [], secondary = []) => {
         const map = new Map();
         for (const doc of primary) {
@@ -173,6 +181,47 @@ await Actor.main(async () => {
             map.set(key, { ...existing, ...doc });
         }
         return Array.from(map.values());
+    };
+
+    // Attempt to use Practo JSON search endpoint first (stealthier, faster).
+    const fetchDoctorsViaApi = async ({ cityName, specialityName, page, proxyUrl, cookieJar }) => {
+        const apiUrl = `https://www.practo.com/search/doctors?results_type=doctor&q=%5B%7B%22word%22%3A%22${encodeURIComponent(specialityName)}%22%2C%22autocompleted%22%3Atrue%2C%22category%22%3A%22subspeciality%22%7D%5D&city=${encodeURIComponent(cityName)}&page=${page}`;
+        const res = await gotScraping({
+            url: apiUrl,
+            headers: defaultHeaders,
+            proxyUrl,
+            cookieJar,
+            http2: false,
+            timeout: { request: 20000 },
+        });
+        const contentType = res.headers['content-type'] || '';
+        if (contentType.includes('application/json')) {
+            const body = typeof res.body === 'string' ? res.body : res.body.toString();
+            let parsed;
+            try {
+                parsed = JSON.parse(body);
+            } catch {
+                parsed = null;
+            }
+            if (parsed?.data?.length) {
+                return parsed.data.map((item) => ({
+                    name: item.name || null,
+                    speciality: item.speciality || specialityName,
+                    experience: item.experience_years || null,
+                    location: item.locality || null,
+                    city: item.city || cityName,
+                    consultationFee: item.consultation_fee || null,
+                    rating: item.recommendation_score ? Number(item.recommendation_score) : null,
+                    url: toAbsoluteUrl(item.link || item.url),
+                    profileImage: toAbsoluteUrl(item.profile_picture),
+                    source: 'api',
+                }));
+            }
+        }
+
+        // If not pure JSON, parse JSON-LD from HTML body.
+        const $ = cheerioLoad(res.body);
+        return parseJsonLdDoctors($);
     };
 
     const makePageUrl = (currentUrl, page) => {
@@ -236,19 +285,30 @@ await Actor.main(async () => {
         persistCookiesPerSession: true,
         autoscaledPoolOptions: {
             desiredConcurrency: maxConcurrency,
-            minConcurrency: Math.min(5, maxConcurrency),
+            minConcurrency: Math.min(3, maxConcurrency),
         },
         maxConcurrency,
-        maxRequestRetries: 4,
-        requestHandlerTimeoutSecs: 120,
+        maxRequestRetries: 3,
+        requestHandlerTimeoutSecs: 60,
+        preNavigationHooks: [
+            async ({ session, request }) => {
+                // Mark bad sessions quickly on repeated 403s.
+                if (request.retryCount >= 2 && session) session.markBad();
+            },
+        ],
         failedRequestHandler: async ({ request }, error) => {
             log.warning(`Request failed: ${request.url} (${error?.message || error})`);
         },
-        requestHandler: async ({ request, $, response }) => {
+        requestHandler: async ({ request, $, response, session, proxyInfo }) => {
             const label = request.userData?.label || 'LIST';
             const pageNo = request.userData?.page ?? 1;
 
-            log.debug(`${label} status=${response?.statusCode ?? 'n/a'} url=${request.url}`);
+            if (response?.statusCode === 403) {
+                session?.markBad();
+                log.warning(`403 blocked, retiring session for ${request.url}`);
+                return;
+            }
+
             if (!$) {
                 log.warning(`Missing HTML for ${request.url}`);
                 return;
@@ -286,7 +346,20 @@ await Actor.main(async () => {
                 return;
             }
 
-            const jsonDocs = parseJsonLdDoctors($);
+            // LIST handler: API first, HTML fallback.
+            let jsonDocs = [];
+            try {
+                jsonDocs = await fetchDoctorsViaApi({
+                    cityName: city,
+                    specialityName: speciality,
+                    page: pageNo,
+                    proxyUrl: proxyInfo?.url,
+                    cookieJar: session?.cookieJar,
+                });
+            } catch (err) {
+                log.debug(`API fetch failed on page ${pageNo}: ${err.message}`);
+            }
+
             const htmlDocs = parseHtmlDoctors($);
             const merged = mergeDoctors(jsonDocs, htmlDocs).map((doc) => ({
                 ...doc,
