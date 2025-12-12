@@ -370,12 +370,6 @@ Need help or have suggestions?
   <li>Contact support for technical assistance</li>
 </ul>
 
-## Version History
-
-<ul>
-  <li><strong>v1.0.0</strong> - Initial release with JSON API and HTML parsing support</li>
-</ul>
-
 ---
 
 <p align="center">

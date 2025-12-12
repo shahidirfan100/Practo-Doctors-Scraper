@@ -1,5 +1,7 @@
 import { Actor, log } from 'apify';
 import { CheerioCrawler } from 'crawlee';
+import { gotScraping } from 'got-scraping';
+import { load as cheerioLoad } from 'cheerio';
 
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
@@ -50,6 +52,7 @@ await Actor.main(async () => {
     );
 
     let saved = 0;
+    const detailCache = new Map();
     const seen = new Set();
 
     const clean = (text = '') => text.replace(/\s+/g, ' ').trim();
@@ -88,10 +91,12 @@ await Actor.main(async () => {
                 doctors.push({
                     name: item.name || null,
                     speciality: item.medicalSpecialty || item.specialty || null,
+                    description: item.description || null,
                     consultationFee: item.priceRange ? Number(item.priceRange) : null,
                     location: item.address?.addressLocality || item.address?.streetAddress || null,
                     city: item.address?.addressRegion || null,
                     url: toAbsoluteUrl(item.url),
+                    profileImage: toAbsoluteUrl(item.image || (Array.isArray(item.photo) ? item.photo[0]?.url : null)),
                     rating: item.aggregateRating?.ratingValue ? Number(item.aggregateRating.ratingValue) : null,
                     source: 'json-ld',
                 });
@@ -120,6 +125,10 @@ await Actor.main(async () => {
             const rating = numberFromText($card.find('[data-qa-id="doctor_recommendation"]').text(), null);
             const patientStories = numberFromText($card.find('[data-qa-id="total_feedback"]').text(), 0);
             const clinicName = clean($card.find('[data-qa-id="doctor_clinic_name"]').text());
+            const profileImage = toAbsoluteUrl(
+                $card.find('img').first().attr('src')
+                || $card.find('img').first().attr('data-src'),
+            );
 
             if (!name && !urlAbs) return;
             doctors.push({
@@ -132,6 +141,7 @@ await Actor.main(async () => {
                 rating,
                 patientStories,
                 clinicName,
+                profileImage,
                 url: urlAbs,
                 source: 'html',
             });
@@ -165,13 +175,52 @@ await Actor.main(async () => {
         const relNext = $('a[rel="next"]').attr('href');
         if (relNext) return toAbsoluteUrl(relNext);
 
-        const labeledNext = $('a:contains("Next")').not('.disabled').first().attr('href');
+        const labeledNext = $('a:contains("Next"), a[aria-label="Next"]').not('.disabled').first().attr('href');
         if (labeledNext) return toAbsoluteUrl(labeledNext);
 
         const pageLink = $(`a[href*="page=${currentPage + 1}"]`).first().attr('href');
         if (pageLink) return toAbsoluteUrl(pageLink);
 
+        const anyHigher = $('a[href*="page="]').map((_, el) => {
+            const href = $(el).attr('href') || '';
+            const match = href.match(/page=(\d+)/);
+            return match ? { href, page: Number(match[1]) } : null;
+        }).get().filter(Boolean).sort((a, b) => a.page - b.page);
+        const nextHigher = anyHigher.find((item) => item.page > currentPage);
+        if (nextHigher) return toAbsoluteUrl(nextHigher.href);
+
         return null;
+    };
+
+    const fetchDoctorDetail = async (doctor) => {
+        if (!doctor.url) return doctor;
+        if (detailCache.has(doctor.url)) {
+            return { ...doctor, ...detailCache.get(doctor.url) };
+        }
+
+        try {
+            const response = await gotScraping({
+                url: doctor.url,
+                headers: defaultHeaders,
+                proxyUrl: await proxyConfiguration.newUrl(),
+                timeout: { request: 30000 },
+            });
+            const $$ = cheerioLoad(response.body);
+            const description = clean($$('p.c-profile__description').first().text());
+            const profileImage = toAbsoluteUrl(
+                $$('img.c-profile__image').attr('src')
+                || $$('img.c-profile__image').attr('data-src'),
+            );
+            const detail = {
+                description: description || null,
+                profileImage: profileImage || doctor.profileImage || null,
+            };
+            detailCache.set(doctor.url, detail);
+            return { ...doctor, ...detail };
+        } catch (err) {
+            log.debug(`Detail fetch failed for ${doctor.url}: ${err.message}`);
+            return doctor;
+        }
     };
 
     const crawler = new CheerioCrawler({
@@ -210,7 +259,18 @@ await Actor.main(async () => {
             });
 
             const remaining = resultsWanted - saved;
-            const batch = filtered.slice(0, Math.max(0, remaining));
+            const toEnrich = filtered.slice(0, Math.max(0, remaining));
+            const batch = [];
+
+            for (const doc of toEnrich) {
+                if (!doc.description || !doc.profileImage) {
+                    const enriched = await fetchDoctorDetail(doc);
+                    batch.push(enriched);
+                } else {
+                    batch.push(doc);
+                }
+            }
+
             if (batch.length) {
                 await Actor.pushData(batch);
                 saved += batch.length;
