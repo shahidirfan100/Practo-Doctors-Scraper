@@ -1,5 +1,5 @@
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Configuration as CrawleeConfig } from 'crawlee';
+import { CheerioCrawler } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import { load as cheerioLoad } from 'cheerio';
 
@@ -400,10 +400,8 @@ await Actor.main(async () => {
             minConcurrency: Math.min(2, maxConcurrency),
             maxConcurrency: maxConcurrency,
         },
-        maxConcurrency: maxConcurrency,
         maxRequestRetries: 3,
         requestHandlerTimeoutSecs: 60,
-        useExtendedUniqueKey: true,
         preNavigationHooks: [
             async ({ session, request }) => {
                 // Intelligent session retirement
