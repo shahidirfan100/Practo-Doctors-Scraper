@@ -1,0 +1,85 @@
+{
+  "title": "Practo Doctors Scraper",
+  "description": "Extract verified doctor profiles from Practo with speciality, location, ratings, experience, and consultation fees. Supports JSON API and HTML parsing.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Direct Practo doctor listing URL (e.g., https://www.practo.com/bangalore/dermatologist). If provided, this overrides speciality and city fields.",
+      "editor": "textfield",
+      "example": "https://www.practo.com/bangalore/dermatologist"
+    },
+    "speciality": {
+      "title": "Speciality",
+      "type": "string",
+      "description": "Doctor speciality to search for (e.g., dermatologist, cardiologist, dentist, gynecologist).",
+      "editor": "textfield",
+      "default": "dermatologist",
+      "example": "dermatologist"
+    },
+    "city": {
+      "title": "City",
+      "type": "string",
+      "description": "City name for doctor search (e.g., bangalore, delhi, mumbai, pune, hyderabad).",
+      "editor": "textfield",
+      "default": "bangalore",
+      "example": "bangalore"
+    },
+    "locality": {
+      "title": "Locality (Optional)",
+      "type": "string",
+      "description": "Specific locality within the city (e.g., koramangala, indiranagar). Leave empty for city-wide search.",
+      "editor": "textfield",
+      "example": "koramangala"
+    },
+    "results_wanted": {
+      "title": "Maximum Results",
+      "type": "integer",
+      "description": "Maximum number of doctor profiles to extract.",
+      "minimum": 1,
+      "default": 100,
+      "editor": "number",
+      "example": 100
+    },
+    "max_pages": {
+      "title": "Maximum Pages",
+      "type": "integer",
+      "description": "Maximum number of listing pages to scrape (safety limit).",
+      "minimum": 1,
+      "default": 10,
+      "editor": "number",
+      "example": 10
+    },
+    "minExperience": {
+      "title": "Minimum Experience (Years)",
+      "type": "integer",
+      "description": "Filter doctors by minimum years of experience.",
+      "minimum": 0,
+      "default": 0,
+      "editor": "number",
+      "example": 5
+    },
+    "minRating": {
+      "title": "Minimum Rating (%)",
+      "type": "integer",
+      "description": "Filter doctors by minimum rating percentage (0-100).",
+      "minimum": 0,
+      "maximum": 100,
+      "default": 0,
+      "editor": "number",
+      "example": 85
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Proxy settings for requests. Residential proxies recommended for best results.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      }
+    }
+  }
+}

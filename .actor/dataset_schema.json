@@ -1,0 +1,68 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "name",
+          "speciality",
+          "experience",
+          "rating",
+          "consultationFee",
+          "location",
+          "city",
+          "patientStories",
+          "clinicName",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "name": {
+            "label": "Doctor Name",
+            "format": "text"
+          },
+          "speciality": {
+            "label": "Speciality",
+            "format": "text"
+          },
+          "experience": {
+            "label": "Experience (Years)",
+            "format": "number"
+          },
+          "rating": {
+            "label": "Rating (%)",
+            "format": "number"
+          },
+          "consultationFee": {
+            "label": "Consultation Fee (₹)",
+            "format": "number"
+          },
+          "location": {
+            "label": "Location",
+            "format": "text"
+          },
+          "city": {
+            "label": "City",
+            "format": "text"
+          },
+          "patientStories": {
+            "label": "Patient Stories",
+            "format": "number"
+          },
+          "clinicName": {
+            "label": "Clinic/Hospital",
+            "format": "text"
+          },
+          "url": {
+            "label": "Profile URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}
