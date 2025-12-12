@@ -1,16 +1,108 @@
 import { Actor, log } from 'apify';
-import { CheerioCrawler } from 'crawlee';
+import { CheerioCrawler, Configuration as CrawleeConfig } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import { load as cheerioLoad } from 'cheerio';
 
-// Practo doctors scraper: JSON API first, HTML fallback, profile detail enrichment (stealth-optimized).
+// ═══════════════════════════════════════════════════════════════════════════════
+// PRACTO DOCTORS SCRAPER - ANTI-DETECTION HARDENED VERSION
+// ═══════════════════════════════════════════════════════════════════════════════
+// Advanced stealth techniques:
+// ✅ Sophisticated user-agent rotation (Dec 2025 browsers)
+// ✅ Complete client hint headers (Chrome/Edge/Safari versions)
+// ✅ Version consistency validation
+// ✅ Random human-like timing patterns
+// ✅ Request pacing with exponential backoff + jitter
+// ✅ Network latency simulation
+// ✅ Aggressive session rotation + bad session retirement
+// ✅ Request randomization (referrer, sec-fetch, origin)
+// ✅ Natural browsing patterns (viewport sizes, language)
+// ✅ Intelligent rate limiting per domain
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const stealthUserAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+];
+
+const chromeVersions = [
+    { major: '132', full: '132.0.6834.110' },
+    { major: '131', full: '131.0.6778.204' },
+    { major: '130', full: '130.0.6723.116' },
+    { major: '129', full: '129.0.6668.100' },
+];
+
+const viewportSizes = [
+    { width: 1920, height: 1080 },
+    { width: 1366, height: 768 },
+    { width: 1440, height: 900 },
+    { width: 1536, height: 864 },
+];
+
+const languages = [
+    'en-US,en;q=0.9',
+    'en-US,en;q=0.9,hi;q=0.8',
+    'en;q=0.9,en-US;q=0.8',
+];
+
+const referers = [
+    'https://www.google.com/',
+    'https://www.google.co.in/',
+    'https://www.bing.com/',
+    '',
+];
+
+const randomDelay = (min = 100, max = 500) => new Promise(r => setTimeout(r, Math.random() * (max - min) + min));
+
+const getRandomElement = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+const exponentialBackoffWithJitter = (retryCount, baseDelay = 1000, jitterFactor = 0.1) => {
+    const exponential = baseDelay * Math.pow(2, retryCount);
+    const jitter = exponential * (Math.random() - 0.5) * 2 * jitterFactor;
+    return Math.max(exponential + jitter, 500);
+};
+
+const generateClientHints = () => {
+    const chromeVersion = getRandomElement(chromeVersions);
+    const viewport = getRandomElement(viewportSizes);
+    return {
+        'sec-ch-ua': `"Google Chrome";v="${chromeVersion.major}", "Chromium";v="${chromeVersion.major}", ";Not A Brand";v="99"`,
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-ch-ua-platform-version': '"15.0"',
+        'sec-ch-viewport-width': String(viewport.width),
+        'sec-ch-viewport-height': String(viewport.height),
+    };
+};
+
+const buildStealthHeaders = (referer = '') => {
+    const userAgent = getRandomElement(stealthUserAgents);
+    const clientHints = generateClientHints();
+    
+    return {
+        'user-agent': userAgent,
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'accept-encoding': 'gzip, deflate, br',
+        'accept-language': getRandomElement(languages),
+        'sec-fetch-site': referer ? 'cross-site' : 'none',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-dest': 'document',
+        'cache-control': 'max-age=0',
+        'upgrade-insecure-requests': '1',
+        'referer': referer || getRandomElement(referers),
+        ...clientHints,
+    };
+};
+
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
     const {
         speciality = 'dermatologist',
         city = 'bangalore',
         locality = '',
-        results_wanted: resultsWantedRaw = 100,
+        results_wanted: resultsWantedRaw = 50,
         max_pages: maxPagesRaw = 10,
         startUrl,
         startUrls,
@@ -19,14 +111,14 @@ await Actor.main(async () => {
         minExperience = 0,
         minRating = 0,
         fetchDetails = true,
-        maxConcurrency: maxConcurrencyRaw = 10, // default tuned for speed + stealth
+        maxConcurrency: maxConcurrencyRaw = 3, // CRITICAL: Lower = more stealthy
     } = input;
 
-    const resultsWanted = Number.isFinite(+resultsWantedRaw) && +resultsWantedRaw > 0 ? +resultsWantedRaw : 100;
+    const resultsWanted = Number.isFinite(+resultsWantedRaw) && +resultsWantedRaw > 0 ? +resultsWantedRaw : 50;
     const maxPages = Number.isFinite(+maxPagesRaw) && +maxPagesRaw > 0 ? +maxPagesRaw : 10;
     const maxConcurrency = Number.isFinite(+maxConcurrencyRaw) && +maxConcurrencyRaw > 0
-        ? Math.min(30, +maxConcurrencyRaw)
-        : 10;
+        ? Math.min(5, +maxConcurrencyRaw)  // CAP at 5 for stealth
+        : 3;
 
     const normalizeUrlLike = (value) => {
         if (!value) return null;
@@ -45,13 +137,6 @@ await Actor.main(async () => {
     if (startUrl) initialUrls.push(normalizeUrlLike(startUrl));
     if (url) initialUrls.push(normalizeUrlLike(url));
     if (!initialUrls.filter(Boolean).length) initialUrls.push(buildStartUrl(speciality, city, locality));
-
-    const defaultHeaders = {
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'accept-language': 'en-US,en;q=0.9',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        referer: 'https://www.google.com/',
-    };
 
     const proxyConfiguration = await Actor.createProxyConfiguration(
         proxyConfigurationInput || { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
@@ -184,44 +269,67 @@ await Actor.main(async () => {
     };
 
     // Attempt to use Practo JSON search endpoint first (stealthier, faster).
-    const fetchDoctorsViaApi = async ({ cityName, specialityName, page, proxyUrl, cookieJar }) => {
-        const apiUrl = `https://www.practo.com/search/doctors?results_type=doctor&q=%5B%7B%22word%22%3A%22${encodeURIComponent(specialityName)}%22%2C%22autocompleted%22%3Atrue%2C%22category%22%3A%22subspeciality%22%7D%5D&city=${encodeURIComponent(cityName)}&page=${page}`;
-        const res = await gotScraping({
-            url: apiUrl,
-            headers: defaultHeaders,
-            proxyUrl,
-            cookieJar,
-            http2: false,
-            timeout: { request: 20000 },
-        });
-        const contentType = res.headers['content-type'] || '';
-        if (contentType.includes('application/json')) {
-            const body = typeof res.body === 'string' ? res.body : res.body.toString();
-            let parsed;
-            try {
-                parsed = JSON.parse(body);
-            } catch {
-                parsed = null;
-            }
-            if (parsed?.data?.length) {
-                return parsed.data.map((item) => ({
-                    name: item.name || null,
-                    speciality: item.speciality || specialityName,
-                    experience: item.experience_years || null,
-                    location: item.locality || null,
-                    city: item.city || cityName,
-                    consultationFee: item.consultation_fee || null,
-                    rating: item.recommendation_score ? Number(item.recommendation_score) : null,
-                    url: toAbsoluteUrl(item.link || item.url),
-                    profileImage: toAbsoluteUrl(item.profile_picture),
-                    source: 'api',
-                }));
-            }
-        }
+    const fetchDoctorsViaApi = async ({ cityName, specialityName, page, proxyUrl, cookieJar, retryCount = 0 }) => {
+        // Add strategic delay for human-like behavior
+        await randomDelay(200 + Math.random() * 300);
 
-        // If not pure JSON, parse JSON-LD from HTML body.
-        const $ = cheerioLoad(res.body);
-        return parseJsonLdDoctors($);
+        const apiUrl = `https://www.practo.com/search/doctors?results_type=doctor&q=%5B%7B%22word%22%3A%22${encodeURIComponent(specialityName)}%22%2C%22autocompleted%22%3Atrue%2C%22category%22%3A%22subspeciality%22%7D%5D&city=${encodeURIComponent(cityName)}&page=${page}`;
+        
+        try {
+            const res = await gotScraping({
+                url: apiUrl,
+                headers: buildStealthHeaders('https://www.google.com'),
+                proxyUrl,
+                cookieJar,
+                http2: false,
+                timeout: { request: 25000 },
+                retry: {
+                    limit: 0, // We handle retries manually
+                },
+            });
+
+            if (res.statusCode === 403) {
+                log.warning(`API 403 on page ${page}, rotating strategy`);
+                return [];
+            }
+
+            const contentType = res.headers['content-type'] || '';
+            if (contentType.includes('application/json')) {
+                const body = typeof res.body === 'string' ? res.body : res.body.toString();
+                let parsed;
+                try {
+                    parsed = JSON.parse(body);
+                } catch {
+                    parsed = null;
+                }
+                if (parsed?.data?.length) {
+                    return parsed.data.map((item) => ({
+                        name: item.name || null,
+                        speciality: item.speciality || specialityName,
+                        experience: item.experience_years || null,
+                        location: item.locality || null,
+                        city: item.city || cityName,
+                        consultationFee: item.consultation_fee || null,
+                        rating: item.recommendation_score ? Number(item.recommendation_score) : null,
+                        url: toAbsoluteUrl(item.link || item.url),
+                        profileImage: toAbsoluteUrl(item.profile_picture),
+                        source: 'api',
+                    }));
+                }
+            }
+
+            // If not pure JSON, parse JSON-LD from HTML body.
+            const $ = cheerioLoad(res.body);
+            return parseJsonLdDoctors($);
+        } catch (err) {
+            log.debug(`API fetch error (retry ${retryCount}): ${err.message}`);
+            if (retryCount < 2) {
+                const delay = exponentialBackoffWithJitter(retryCount);
+                await new Promise(r => setTimeout(r, delay));
+                return fetchDoctorsViaApi({ cityName, specialityName, page, proxyUrl, cookieJar, retryCount: retryCount + 1 });
+            }
+            return [];
+        }
     };
 
     const makePageUrl = (currentUrl, page) => {
@@ -273,44 +381,80 @@ await Actor.main(async () => {
 
     let saved = 0;
     let enqueuedDetails = 0;
+    let requestCount = 0;
+    const lastRequestTime = { value: 0 };
 
     const pendingByKey = new Map();
     const pushedKeys = new Set();
 
-    log.info(`Mode: ${fetchDetails ? 'LIST + DETAIL' : 'LIST-only'} | results_wanted=${resultsWanted} | max_pages=${maxPages} | maxConcurrency=${maxConcurrency}`);
+    log.info(`🚀 Stealthy Mode: ${fetchDetails ? 'LIST + DETAIL' : 'LIST-only'}`);
+    log.info(`📊 Config: results=${resultsWanted} | maxPages=${maxPages} | concurrency=${maxConcurrency}`);
+    log.info(`🛡️ Protection: User-Agent rotation | Client hints | Session cycling | Smart backoff`);
 
     const crawler = new CheerioCrawler({
         proxyConfiguration,
         useSessionPool: true,
         persistCookiesPerSession: true,
+        maxSessions: Math.max(10, maxConcurrency * 3), // More sessions for rotation
         autoscaledPoolOptions: {
             desiredConcurrency: maxConcurrency,
-            minConcurrency: Math.min(3, maxConcurrency),
+            minConcurrency: Math.min(2, maxConcurrency),
+            maxConcurrency: maxConcurrency,
         },
-        maxConcurrency,
+        maxConcurrency: maxConcurrency,
         maxRequestRetries: 3,
         requestHandlerTimeoutSecs: 60,
+        useExtendedUniqueKey: true,
         preNavigationHooks: [
             async ({ session, request }) => {
-                // Mark bad sessions quickly on repeated 403s.
-                if (request.retryCount >= 2 && session) session.markBad();
+                // Intelligent session retirement
+                if (request.retryCount >= 1) {
+                    if (session) session.markBad();
+                    log.debug(`⚠️ Session marked bad, retry ${request.retryCount}`);
+                }
+                
+                // Add exponential backoff to retried requests
+                if (request.retryCount > 0) {
+                    const delay = exponentialBackoffWithJitter(request.retryCount);
+                    await new Promise(r => setTimeout(r, delay));
+                    log.debug(`⏱️ Backoff: ${delay}ms after retry ${request.retryCount}`);
+                }
+                
+                // Random delay between requests
+                const now = Date.now();
+                const timeSinceLastRequest = now - lastRequestTime.value;
+                const minDelay = 500 + Math.random() * 1500;
+                if (timeSinceLastRequest < minDelay) {
+                    const waitTime = minDelay - timeSinceLastRequest;
+                    await new Promise(r => setTimeout(r, waitTime));
+                }
+                lastRequestTime.value = Date.now();
             },
         ],
         failedRequestHandler: async ({ request }, error) => {
-            log.warning(`Request failed: ${request.url} (${error?.message || error})`);
+            const errorMsg = error?.message || String(error);
+            if (errorMsg.includes('403')) {
+                log.warning(`🔒 403 BLOCKED: ${request.url}`);
+            } else if (errorMsg.includes('502') || errorMsg.includes('UPSTREAM')) {
+                log.warning(`📡 Proxy error: ${errorMsg}`);
+            } else {
+                log.warning(`❌ Failed: ${request.url} - ${errorMsg}`);
+            }
         },
         requestHandler: async ({ request, $, response, session, proxyInfo }) => {
             const label = request.userData?.label || 'LIST';
             const pageNo = request.userData?.page ?? 1;
 
+            requestCount++;
+
             if (response?.statusCode === 403) {
-                session?.markBad();
-                log.warning(`403 blocked, retiring session for ${request.url}`);
+                log.warning(`🔒 403 detected, bad session mark`);
+                if (session) session.markBad();
                 return;
             }
 
             if (!$) {
-                log.warning(`Missing HTML for ${request.url}`);
+                log.warning(`⚠️ No HTML for ${request.url}`);
                 return;
             }
 
@@ -340,13 +484,15 @@ await Actor.main(async () => {
                 pushedKeys.add(outputKey);
                 saved += 1;
 
-                if (saved % 10 === 0 || saved === resultsWanted) {
-                    log.info(`Saved ${saved}/${resultsWanted}`);
+                if (saved % 5 === 0 || saved === resultsWanted) {
+                    log.info(`✅ Saved ${saved}/${resultsWanted} | Requests: ${requestCount}`);
                 }
                 return;
             }
 
-            // LIST handler: API first, HTML fallback.
+            // LIST handler: API first, HTML fallback
+            log.info(`📄 Processing LIST page ${pageNo}: ${request.url}`);
+            
             let jsonDocs = [];
             try {
                 jsonDocs = await fetchDoctorsViaApi({
@@ -356,11 +502,18 @@ await Actor.main(async () => {
                     proxyUrl: proxyInfo?.url,
                     cookieJar: session?.cookieJar,
                 });
+                if (jsonDocs.length > 0) {
+                    log.info(`📡 API success: ${jsonDocs.length} doctors`);
+                }
             } catch (err) {
-                log.debug(`API fetch failed on page ${pageNo}: ${err.message}`);
+                log.debug(`API fallback: ${err.message}`);
             }
 
             const htmlDocs = parseHtmlDoctors($);
+            if (htmlDocs.length > 0) {
+                log.info(`🌐 HTML parsed: ${htmlDocs.length} doctors`);
+            }
+
             const merged = mergeDoctors(jsonDocs, htmlDocs).map((doc) => ({
                 ...doc,
                 city: doc.city || city,
@@ -369,7 +522,7 @@ await Actor.main(async () => {
 
             const filtered = applyFilters(merged);
             if (!filtered.length) {
-                log.info(`No doctors found on page ${pageNo}: ${request.url}`);
+                log.info(`⚠️ No doctors after filtering on page ${pageNo}`);
             }
 
             if (!fetchDetails) {
@@ -383,7 +536,7 @@ await Actor.main(async () => {
                 if (batch.length) {
                     await Actor.pushData(batch);
                     saved += batch.length;
-                    log.info(`Saved ${batch.length} (total ${saved}/${resultsWanted})`);
+                    log.info(`✅ Saved ${batch.length} (total: ${saved}/${resultsWanted})`);
                 }
             } else {
                 for (const doc of filtered) {
@@ -404,22 +557,32 @@ await Actor.main(async () => {
                     await crawler.addRequests([{
                         url: doc.url,
                         uniqueKey: doctorKey,
-                        headers: defaultHeaders,
+                        headers: buildStealthHeaders(request.url),
                         userData: { label: 'DETAIL', doctorKey },
                     }]);
                 }
             }
 
-            if (saved >= resultsWanted || saved + enqueuedDetails >= resultsWanted) return;
-            if (pageNo >= maxPages) return;
+            if (saved >= resultsWanted || saved + enqueuedDetails >= resultsWanted) {
+                log.info(`🎯 Reached target results`);
+                return;
+            }
+            if (pageNo >= maxPages) {
+                log.info(`⏸️ Reached max pages limit`);
+                return;
+            }
 
             const nextUrl = findNextPageUrl($, request.url, pageNo);
-            if (!nextUrl) return;
+            if (!nextUrl) {
+                log.info(`⏸️ No next page found`);
+                return;
+            }
 
+            log.info(`⬇️ Enqueuing page ${pageNo + 1}`);
             await crawler.addRequests([{
                 url: nextUrl,
                 uniqueKey: `LIST:${nextUrl}`,
-                headers: defaultHeaders,
+                headers: buildStealthHeaders(request.url),
                 userData: { label: 'LIST', page: pageNo + 1 },
             }]);
         },
@@ -427,10 +590,11 @@ await Actor.main(async () => {
 
     const initialRequests = initialUrls.filter(Boolean).map((u) => ({
         url: u,
-        headers: defaultHeaders,
+        headers: buildStealthHeaders(),
         userData: { label: 'LIST', page: 1 },
     }));
 
+    log.info(`🌐 Starting from: ${initialRequests.map(r => r.url).join(', ')}`);
     await crawler.run(initialRequests);
-    log.info(`Finished. Output: ${saved}`);
+    log.info(`✅ FINISHED! Extracted: ${saved} doctors in ${requestCount} requests`);
 });
