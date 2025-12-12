@@ -1,7 +1,5 @@
 import { Actor, log } from 'apify';
 import { CheerioCrawler } from 'crawlee';
-import { gotScraping } from 'got-scraping';
-import { load as cheerioLoad } from 'cheerio';
 
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
@@ -17,10 +15,13 @@ await Actor.main(async () => {
         proxyConfiguration: proxyConfigurationInput,
         minExperience = 0,
         minRating = 0,
+        fetchDetails = true,
+        maxConcurrency: maxConcurrencyRaw = 15,
     } = input;
 
     const resultsWanted = Number.isFinite(+resultsWantedRaw) && +resultsWantedRaw > 0 ? +resultsWantedRaw : 100;
     const maxPages = Number.isFinite(+maxPagesRaw) && +maxPagesRaw > 0 ? +maxPagesRaw : 10;
+    const maxConcurrency = Number.isFinite(+maxConcurrencyRaw) && +maxConcurrencyRaw > 0 ? Math.min(50, +maxConcurrencyRaw) : 10;
 
     const normalizeUrlLike = (value) => {
         if (!value) return null;
@@ -29,14 +30,16 @@ await Actor.main(async () => {
         return null;
     };
 
-    const startFromInput = [];
-    if (Array.isArray(startUrls) && startUrls.length) startFromInput.push(...startUrls.map(normalizeUrlLike).filter(Boolean));
-    if (startUrl) startFromInput.push(normalizeUrlLike(startUrl));
-    if (url) startFromInput.push(normalizeUrlLike(url));
-    if (!startFromInput.filter(Boolean).length) {
-        const base = `https://www.practo.com/${city}/${speciality}`;
-        startFromInput.push(locality ? `${base}/${locality}` : base);
-    }
+    const buildStartUrl = (spec, cty, loc) => {
+        const base = `https://www.practo.com/${cty}/${spec}`;
+        return loc ? `${base}/${loc}` : base;
+    };
+
+    const initialUrls = [];
+    if (Array.isArray(startUrls) && startUrls.length) initialUrls.push(...startUrls.map(normalizeUrlLike).filter(Boolean));
+    if (startUrl) initialUrls.push(normalizeUrlLike(startUrl));
+    if (url) initialUrls.push(normalizeUrlLike(url));
+    if (!initialUrls.filter(Boolean).length) initialUrls.push(buildStartUrl(speciality, city, locality));
 
     const defaultHeaders = {
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -45,39 +48,41 @@ await Actor.main(async () => {
         referer: 'https://www.google.com/',
     };
 
-    const checklist = [
-        'Hit listing endpoints with browser-like headers and proxy before parsing.',
-        'Extract doctors from JSON-LD first to avoid brittle selectors.',
-        'Fallback to HTML card parsing when structured data is absent.',
-        'Deduplicate by profile URL/name and apply filters before saving.',
-        'Stop at results_wanted/max_pages while paginating defensively.',
-    ];
-    log.info(`Execution plan:\n- ${checklist.join('\n- ')}`);
-
     const proxyConfiguration = await Actor.createProxyConfiguration(
         proxyConfigurationInput || { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
     );
 
-    let saved = 0;
-    const detailCache = new Map();
-    const seen = new Set();
-
-    const clean = (text = '') => text.replace(/\s+/g, ' ').trim();
+    const clean = (text = '') => String(text).replace(/\s+/g, ' ').trim();
     const numberFromText = (text = '', fallback = 0) => {
         const match = clean(text).replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
         return match ? Number(match[1]) : fallback;
     };
-    const toAbsoluteUrl = (value) => {
+    const toAbsoluteUrl = (value, base = 'https://www.practo.com') => {
         if (!value) return null;
         try {
-            return value.startsWith('http') ? value : new URL(value, 'https://www.practo.com').toString();
-        } catch (err) {
-            log.debug(`Failed to normalize URL "${value}": ${err.message}`);
+            return value.startsWith('http') ? value : new URL(value, base).toString();
+        } catch {
+            return null;
+        }
+    };
+    const toDoctorKey = (value) => {
+        const abs = toAbsoluteUrl(value);
+        if (!abs) return null;
+        try {
+            const u = new URL(abs);
+            return `${u.origin}${u.pathname}`;
+        } catch {
             return null;
         }
     };
 
-    function parseJsonLdDoctors($) {
+    const applyFilters = (doctors) => doctors.filter((doc) => {
+        const experienceOk = (doc.experience ?? 0) >= minExperience;
+        const ratingOk = !minRating || (doc.rating ?? 0) >= minRating;
+        return experienceOk && ratingOk;
+    });
+
+    const parseJsonLdDoctors = ($) => {
         const doctors = [];
         $('script[type="application/ld+json"]').each((_, el) => {
             const raw = $(el).contents().text();
@@ -92,7 +97,10 @@ await Actor.main(async () => {
             for (const item of items) {
                 const type = item['@type'];
                 const typeList = Array.isArray(type) ? type.map(String) : [String(type || '')];
-                const isDoctor = typeList.some((t) => t.toLowerCase() === 'physician' || t.toLowerCase() === 'person');
+                const isDoctor = typeList.some((t) => {
+                    const normalized = t.toLowerCase();
+                    return normalized === 'physician' || normalized === 'person';
+                });
                 if (!isDoctor) continue;
 
                 doctors.push({
@@ -110,9 +118,9 @@ await Actor.main(async () => {
             }
         });
         return doctors;
-    }
+    };
 
-    function parseHtmlDoctors($) {
+    const parseHtmlDoctors = ($) => {
         const doctors = [];
         const cards = $('[data-qa-id="doctor_card"], .listing-doctor-card, .doctor-card');
         cards.each((_, card) => {
@@ -122,7 +130,7 @@ await Actor.main(async () => {
             const urlAbs = toAbsoluteUrl(urlPath);
             const specialityText = clean(
                 $card.find('[data-qa-id="doctor_name"]').closest('.info-section').find('.u-grey_3-text span').first().text()
-                || $card.find('[class*="speciality"]').first().text()
+                || $card.find('[class*="speciality"]').first().text(),
             );
             const experienceText = clean($card.find('[data-qa-id="doctor_experience"]').text());
             const experience = experienceText ? numberFromText(experienceText, 0) : numberFromText($card.text(), 0);
@@ -132,31 +140,26 @@ await Actor.main(async () => {
             const rating = numberFromText($card.find('[data-qa-id="doctor_recommendation"]').text(), null);
             const patientStories = numberFromText($card.find('[data-qa-id="total_feedback"]').text(), 0);
             const clinicName = clean($card.find('[data-qa-id="doctor_clinic_name"]').text());
-            const profileImage = toAbsoluteUrl(
-                $card.find('img').first().attr('src')
-                || $card.find('img').first().attr('data-src'),
-            );
 
             if (!name && !urlAbs) return;
             doctors.push({
-                name,
+                name: name || null,
                 speciality: specialityText || null,
                 experience,
-                location,
+                location: location || null,
                 city: cityFromCard || null,
                 consultationFee: fee,
                 rating,
                 patientStories,
-                clinicName,
-                profileImage,
+                clinicName: clinicName || null,
                 url: urlAbs,
                 source: 'html',
             });
         });
         return doctors;
-    }
+    };
 
-    function mergeDoctors(primary = [], secondary = []) {
+    const mergeDoctors = (primary = [], secondary = []) => {
         const map = new Map();
         for (const doc of primary) {
             const key = doc.url || doc.name;
@@ -170,19 +173,13 @@ await Actor.main(async () => {
             map.set(key, { ...existing, ...doc });
         }
         return Array.from(map.values());
-    }
-
-    const applyFilters = (doctors) => doctors.filter((doc) => {
-        const experienceOk = (doc.experience ?? 0) >= minExperience;
-        const ratingOk = !minRating || (doc.rating ?? 0) >= minRating;
-        return experienceOk && ratingOk;
-    });
+    };
 
     const makePageUrl = (currentUrl, page) => {
         try {
-            const urlObj = new URL(currentUrl);
-            urlObj.searchParams.set('page', String(page));
-            return urlObj.toString();
+            const u = new URL(currentUrl);
+            u.searchParams.set('page', String(page));
+            return u.toString();
         } catch {
             return null;
         }
@@ -198,161 +195,169 @@ await Actor.main(async () => {
         const pageLink = $(`a[href*="page=${currentPage + 1}"]`).first().attr('href');
         if (pageLink) return toAbsoluteUrl(pageLink);
 
-        const anyHigher = $('a[href*="page="]').map((_, el) => {
-            const href = $(el).attr('href') || '';
-            const match = href.match(/page=(\d+)/);
-            return match ? { href, page: Number(match[1]) } : null;
-        }).get().filter(Boolean).sort((a, b) => a.page - b.page);
-        const nextHigher = anyHigher.find((item) => item.page > currentPage);
-        if (nextHigher) return toAbsoluteUrl(nextHigher.href);
-
         const constructed = makePageUrl(currentUrl, currentPage + 1);
         if (constructed) return constructed;
 
         return null;
     };
 
-    const fetchDoctorDetail = async (doctor, { proxyUrl, cookieJar }) => {
-        if (!doctor.url) return doctor;
-        if (detailCache.has(doctor.url)) {
-            return { ...doctor, ...detailCache.get(doctor.url) };
-        }
+    const parseDoctorDetail = ($, requestUrl) => {
+        const description = clean($('p.c-profile__description').first().text());
+        const profileImage = toAbsoluteUrl(
+            $('img.c-profile__image').attr('src') || $('img.c-profile__image').attr('data-src'),
+        );
 
-        try {
-            const response = await gotScraping({
-                url: doctor.url,
-                headers: defaultHeaders,
-                proxyUrl,
-                cookieJar,
-                timeout: { request: 20000 },
-            });
-            const $$ = cheerioLoad(response.body);
-            const description = clean($$('p.c-profile__description').first().text());
-            const profileImage = toAbsoluteUrl(
-                $$('img.c-profile__image').attr('src')
-                || $$('img.c-profile__image').attr('data-src'),
-            );
-            const detail = {
+        if (description || profileImage) {
+            return {
                 description: description || null,
-                profileImage: profileImage || doctor.profileImage || null,
+                profileImage: profileImage || null,
             };
-            detailCache.set(doctor.url, detail);
-            return { ...doctor, ...detail };
-        } catch (err) {
-            log.debug(`Detail fetch failed for ${doctor.url}: ${err.message}`);
-            return doctor;
         }
+
+        const jsonDoctors = parseJsonLdDoctors($);
+        const best = jsonDoctors.find((d) => d.url && toDoctorKey(d.url) === toDoctorKey(requestUrl)) || jsonDoctors[0];
+        return {
+            description: best?.description || null,
+            profileImage: best?.profileImage || null,
+        };
     };
 
-    const mapWithConcurrency = async (items, concurrency, mapper) => {
-        const results = new Array(items.length);
-        let nextIndex = 0;
-        const workers = new Array(Math.min(concurrency, items.length)).fill(0).map(async () => {
-            while (true) {
-                const index = nextIndex;
-                nextIndex += 1;
-                if (index >= items.length) return;
-                results[index] = await mapper(items[index], index);
-            }
-        });
-        await Promise.all(workers);
-        return results;
-    };
+    let saved = 0;
+    let enqueuedDetails = 0;
+
+    const pendingByKey = new Map();
+    const pushedKeys = new Set();
+
+    log.info(`Mode: ${fetchDetails ? 'LIST + DETAIL' : 'LIST-only'} | results_wanted=${resultsWanted} | max_pages=${maxPages} | maxConcurrency=${maxConcurrency}`);
 
     const crawler = new CheerioCrawler({
         proxyConfiguration,
         useSessionPool: true,
         persistCookiesPerSession: true,
-        maxConcurrency: 3,
+        autoscaledPoolOptions: {
+            desiredConcurrency: maxConcurrency,
+            minConcurrency: Math.min(5, maxConcurrency),
+        },
+        maxConcurrency,
         maxRequestRetries: 4,
-        requestHandlerTimeoutSecs: 180,
+        requestHandlerTimeoutSecs: 120,
         failedRequestHandler: async ({ request }, error) => {
             log.warning(`Request failed: ${request.url} (${error?.message || error})`);
         },
-        requestHandler: async ({ request, $, response, session, proxyInfo }) => {
-            const pageNo = request.userData.page ?? 1;
-            log.info(`Processing page ${pageNo}: ${request.url} (status ${response?.statusCode ?? 'n/a'})`);
+        requestHandler: async ({ request, $, response }) => {
+            const label = request.userData?.label || 'LIST';
+            const pageNo = request.userData?.page ?? 1;
 
+            log.debug(`${label} status=${response?.statusCode ?? 'n/a'} url=${request.url}`);
             if (!$) {
-                log.warning('Missing Cheerio context ($). Skipping this page.');
+                log.warning(`Missing HTML for ${request.url}`);
+                return;
+            }
+
+            if (label === 'DETAIL') {
+                const doctorKey = request.userData?.doctorKey || toDoctorKey(request.url) || request.url;
+                if (pushedKeys.has(doctorKey)) return;
+
+                const base = pendingByKey.get(doctorKey) || {
+                    url: request.url,
+                    city,
+                    speciality,
+                };
+
+                const detail = parseDoctorDetail($, request.url);
+                const item = {
+                    ...base,
+                    ...detail,
+                    url: base.url || request.url,
+                };
+
+                pendingByKey.delete(doctorKey);
+
+                const outputKey = doctorKey;
+                if (!outputKey || pushedKeys.has(outputKey)) return;
+
+                await Actor.pushData(item);
+                pushedKeys.add(outputKey);
+                saved += 1;
+
+                if (saved % 10 === 0 || saved === resultsWanted) {
+                    log.info(`Saved ${saved}/${resultsWanted}`);
+                }
                 return;
             }
 
             const jsonDocs = parseJsonLdDoctors($);
-            if (jsonDocs.length) {
-                log.debug(`Found ${jsonDocs.length} doctors via JSON-LD`);
-            } else {
-                log.debug('No JSON-LD doctors found on this page');
-            }
-
             const htmlDocs = parseHtmlDoctors($);
-            if (htmlDocs.length) {
-                log.debug(`Parsed ${htmlDocs.length} doctors from HTML`);
-            }
-
             const merged = mergeDoctors(jsonDocs, htmlDocs).map((doc) => ({
                 ...doc,
                 city: doc.city || city,
                 speciality: doc.speciality || speciality,
             }));
 
-            const filtered = applyFilters(merged).filter((doc) => {
-                const key = doc.url || `${doc.name || ''}-${doc.location || ''}-${doc.city || ''}`;
-                if (!key) return false;
-                if (seen.has(key)) return false;
-                seen.add(key);
-                return true;
-            });
+            const filtered = applyFilters(merged);
+            if (!filtered.length) {
+                log.info(`No doctors found on page ${pageNo}: ${request.url}`);
+            }
 
-            const remaining = resultsWanted - saved;
-            const toEnrich = filtered.slice(0, Math.max(0, remaining));
-            const proxyUrl = proxyInfo?.url;
-            const cookieJar = session?.cookieJar;
-            const batch = await mapWithConcurrency(toEnrich, 3, async (doc) => {
-                if (!doc.description || !doc.profileImage) {
-                    return fetchDoctorDetail(doc, { proxyUrl, cookieJar });
+            if (!fetchDetails) {
+                const remaining = resultsWanted - saved;
+                const batch = filtered.slice(0, Math.max(0, remaining)).filter((doc) => {
+                    const key = toDoctorKey(doc.url) || doc.url || doc.name;
+                    if (!key || pushedKeys.has(key)) return false;
+                    pushedKeys.add(key);
+                    return true;
+                });
+                if (batch.length) {
+                    await Actor.pushData(batch);
+                    saved += batch.length;
+                    log.info(`Saved ${batch.length} (total ${saved}/${resultsWanted})`);
                 }
-                return doc;
-            });
-
-            if (batch.length) {
-                await Actor.pushData(batch);
-                saved += batch.length;
-                log.info(`Saved ${batch.length} doctors (total ${saved}/${resultsWanted})`);
             } else {
-                log.debug('No new doctors to save from this page');
+                for (const doc of filtered) {
+                    if (saved + enqueuedDetails >= resultsWanted) break;
+                    if (!doc.url) continue;
+
+                    const doctorKey = toDoctorKey(doc.url);
+                    if (!doctorKey) continue;
+                    if (pendingByKey.has(doctorKey) || pushedKeys.has(doctorKey)) continue;
+
+                    pendingByKey.set(doctorKey, {
+                        ...doc,
+                        url: doc.url,
+                        doctorKey,
+                    });
+
+                    enqueuedDetails += 1;
+                    await crawler.addRequests([{
+                        url: doc.url,
+                        uniqueKey: doctorKey,
+                        headers: defaultHeaders,
+                        userData: { label: 'DETAIL', doctorKey },
+                    }]);
+                }
             }
 
-            if (saved >= resultsWanted) {
-                log.info('Reached requested result count, stopping pagination');
-                return;
-            }
-            if (pageNo >= maxPages) {
-                log.info('Reached max_pages guard, stopping pagination');
-                return;
-            }
+            if (saved >= resultsWanted || saved + enqueuedDetails >= resultsWanted) return;
+            if (pageNo >= maxPages) return;
 
             const nextUrl = findNextPageUrl($, request.url, pageNo);
-            if (!nextUrl) {
-                log.info('No next page link detected');
-                return;
-            }
+            if (!nextUrl) return;
 
             await crawler.addRequests([{
                 url: nextUrl,
-                userData: { page: pageNo + 1 },
+                uniqueKey: `LIST:${nextUrl}`,
                 headers: defaultHeaders,
+                userData: { label: 'LIST', page: pageNo + 1 },
             }]);
-            log.info(`Enqueued page ${pageNo + 1}: ${nextUrl}`);
         },
     });
 
-    const initialRequests = startFromInput.map((u) => ({
+    const initialRequests = initialUrls.filter(Boolean).map((u) => ({
         url: u,
-        userData: { page: 1 },
         headers: defaultHeaders,
+        userData: { label: 'LIST', page: 1 },
     }));
 
     await crawler.run(initialRequests);
-    log.info(`Scraping completed. Total doctors saved: ${saved}`);
+    log.info(`Finished. Output: ${saved}`);
 });
