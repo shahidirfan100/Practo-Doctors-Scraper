@@ -1,100 +1,18 @@
 import { Actor, log } from 'apify';
 import { CheerioCrawler } from 'crawlee';
-import { gotScraping } from 'got-scraping';
-import { load as cheerioLoad } from 'cheerio';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// PRACTO DOCTORS SCRAPER - ANTI-DETECTION HARDENED VERSION
-// ═══════════════════════════════════════════════════════════════════════════════
-// Advanced stealth techniques:
-// ✅ Sophisticated user-agent rotation (Dec 2025 browsers)
-// ✅ Complete client hint headers (Chrome/Edge/Safari versions)
-// ✅ Version consistency validation
-// ✅ Random human-like timing patterns
-// ✅ Request pacing with exponential backoff + jitter
-// ✅ Network latency simulation
-// ✅ Aggressive session rotation + bad session retirement
-// ✅ Request randomization (referrer, sec-fetch, origin)
-// ✅ Natural browsing patterns (viewport sizes, language)
-// ✅ Intelligent rate limiting per domain
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const stealthUserAgents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-];
-
-const chromeVersions = [
-    { major: '132', full: '132.0.6834.110' },
-    { major: '131', full: '131.0.6778.204' },
-    { major: '130', full: '130.0.6723.116' },
-    { major: '129', full: '129.0.6668.100' },
-];
-
-const viewportSizes = [
-    { width: 1920, height: 1080 },
-    { width: 1366, height: 768 },
-    { width: 1440, height: 900 },
-    { width: 1536, height: 864 },
-];
-
-const languages = [
-    'en-US,en;q=0.9',
-    'en-US,en;q=0.9,hi;q=0.8',
-    'en;q=0.9,en-US;q=0.8',
-];
-
-const referers = [
-    'https://www.google.com/',
-    'https://www.google.co.in/',
-    'https://www.bing.com/',
-    '',
-];
-
-const randomDelay = (min = 100, max = 500) => new Promise(r => setTimeout(r, Math.random() * (max - min) + min));
-
-const getRandomElement = (arr) => arr[Math.floor(Math.random() * arr.length)];
-
-const exponentialBackoffWithJitter = (retryCount, baseDelay = 1000, jitterFactor = 0.1) => {
-    const exponential = baseDelay * Math.pow(2, retryCount);
-    const jitter = exponential * (Math.random() - 0.5) * 2 * jitterFactor;
-    return Math.max(exponential + jitter, 500);
-};
-
-const generateClientHints = () => {
-    const chromeVersion = getRandomElement(chromeVersions);
-    const viewport = getRandomElement(viewportSizes);
-    return {
-        'sec-ch-ua': `"Google Chrome";v="${chromeVersion.major}", "Chromium";v="${chromeVersion.major}", ";Not A Brand";v="99"`,
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-ch-ua-platform-version': '"15.0"',
-        'sec-ch-viewport-width': String(viewport.width),
-        'sec-ch-viewport-height': String(viewport.height),
-    };
-};
-
-const buildStealthHeaders = (referer = '') => {
-    const userAgent = getRandomElement(stealthUserAgents);
-    const clientHints = generateClientHints();
-    
-    return {
-        'user-agent': userAgent,
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'accept-encoding': 'gzip, deflate, br',
-        'accept-language': getRandomElement(languages),
-        'sec-fetch-site': referer ? 'cross-site' : 'none',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-dest': 'document',
-        'cache-control': 'max-age=0',
-        'upgrade-insecure-requests': '1',
-        'referer': referer || getRandomElement(referers),
-        ...clientHints,
-    };
-};
+/**
+ * Practo Doctors Scraper (production-oriented, stealthy, fast)
+ *
+ * Strategy (in priority order):
+ * 1) Use Practo search endpoint (HTTP + HTML) and extract doctors from JSON-LD + HTML cards.
+ * 2) Optionally enrich each doctor from the profile page for `description` + `profileImage`.
+ *
+ * Notes:
+ * - Detail/profile pages can 403 depending on proxy geo/quality. This implementation treats details as best-effort:
+ *   it will not stall the run; it will fall back to listing data if the profile blocks/timeouts.
+ * - If you need highest success on detail pages, set Apify Proxy country to `IN` in proxy settings.
+ */
 
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
@@ -111,36 +29,15 @@ await Actor.main(async () => {
         minExperience = 0,
         minRating = 0,
         fetchDetails = true,
-        maxConcurrency: maxConcurrencyRaw = 3, // CRITICAL: Lower = more stealthy
+        // Keep speed + stealth balanced. Detail pages are the most sensitive.
+        maxConcurrency: maxConcurrencyRaw = 10,
     } = input;
 
     const resultsWanted = Number.isFinite(+resultsWantedRaw) && +resultsWantedRaw > 0 ? +resultsWantedRaw : 50;
     const maxPages = Number.isFinite(+maxPagesRaw) && +maxPagesRaw > 0 ? +maxPagesRaw : 10;
     const maxConcurrency = Number.isFinite(+maxConcurrencyRaw) && +maxConcurrencyRaw > 0
-        ? Math.min(5, +maxConcurrencyRaw)  // CAP at 5 for stealth
-        : 3;
-
-    const normalizeUrlLike = (value) => {
-        if (!value) return null;
-        if (typeof value === 'string') return value.trim();
-        if (typeof value === 'object' && typeof value.url === 'string') return value.url.trim();
-        return null;
-    };
-
-    const buildStartUrl = (spec, cty, loc) => {
-        const base = `https://www.practo.com/${cty}/${spec}`;
-        return loc ? `${base}/${loc}` : base;
-    };
-
-    const initialUrls = [];
-    if (Array.isArray(startUrls) && startUrls.length) initialUrls.push(...startUrls.map(normalizeUrlLike).filter(Boolean));
-    if (startUrl) initialUrls.push(normalizeUrlLike(startUrl));
-    if (url) initialUrls.push(normalizeUrlLike(url));
-    if (!initialUrls.filter(Boolean).length) initialUrls.push(buildStartUrl(speciality, city, locality));
-
-    const proxyConfiguration = await Actor.createProxyConfiguration(
-        proxyConfigurationInput || { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
-    );
+        ? Math.min(20, +maxConcurrencyRaw)
+        : 10;
 
     const clean = (text = '') => String(text).replace(/\s+/g, ' ').trim();
     const numberFromText = (text = '', fallback = 0) => {
@@ -166,13 +63,44 @@ await Actor.main(async () => {
         }
     };
 
+    const normalizeUrlLike = (value) => {
+        if (!value) return null;
+        if (typeof value === 'string') return value.trim();
+        if (typeof value === 'object' && typeof value.url === 'string') return value.url.trim();
+        return null;
+    };
+
+    // Minimal, consistent "browser-like" headers.
+    const baseHeaders = {
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'upgrade-insecure-requests': '1',
+    };
+
+    // Default to IN for better Practo success (especially profile pages). Users can override in proxy editor.
+    const proxyConfiguration = await Actor.createProxyConfiguration(
+        proxyConfigurationInput || { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], apifyProxyCountry: 'IN' },
+    );
+
     const applyFilters = (doctors) => doctors.filter((doc) => {
         const experienceOk = (doc.experience ?? 0) >= minExperience;
         const ratingOk = !minRating || (doc.rating ?? 0) >= minRating;
         return experienceOk && ratingOk;
     });
 
-    // Parse doctors from JSON-LD blobs.
+    /**
+     * Practo "search" endpoint that returns the listing HTML.
+     * We use this as our "JSON API first" approach because it is stable and supports paging.
+     */
+    const buildSearchUrl = ({ cityName, specialityName, page }) => {
+        const q = encodeURIComponent(`[{"word":"${specialityName}","autocompleted":true,"category":"subspeciality"}]`);
+        const cityParam = encodeURIComponent(cityName);
+        const pageParam = encodeURIComponent(String(page));
+        return `https://www.practo.com/search/doctors?results_type=doctor&q=${q}&city=${cityParam}&page=${pageParam}`;
+    };
+
+    // Parse doctors from JSON-LD blocks in listing/profile pages.
     const parseJsonLdDoctors = ($) => {
         const doctors = [];
         $('script[type="application/ld+json"]').each((_, el) => {
@@ -211,7 +139,7 @@ await Actor.main(async () => {
         return doctors;
     };
 
-    // Parse doctors from listing HTML cards.
+    // Parse doctors from listing HTML cards (experience, clinic, patient stories, etc).
     const parseHtmlDoctors = ($) => {
         const doctors = [];
         const cards = $('[data-qa-id="doctor_card"], .listing-doctor-card, .doctor-card');
@@ -251,15 +179,15 @@ await Actor.main(async () => {
         return doctors;
     };
 
-    // Merge two doctor lists, preferring primary fields.
+    // Merge two lists, preferring primary fields (primary overwrites secondary).
     const mergeDoctors = (primary = [], secondary = []) => {
         const map = new Map();
-        for (const doc of primary) {
+        for (const doc of secondary) {
             const key = doc.url || doc.name;
             if (!key) continue;
             map.set(key, doc);
         }
-        for (const doc of secondary) {
+        for (const doc of primary) {
             const key = doc.url || doc.name;
             if (!key) continue;
             const existing = map.get(key) || {};
@@ -268,249 +196,143 @@ await Actor.main(async () => {
         return Array.from(map.values());
     };
 
-    // Attempt to use Practo JSON search endpoint first (stealthier, faster).
-    const fetchDoctorsViaApi = async ({ cityName, specialityName, page, proxyUrl, cookieJar, retryCount = 0 }) => {
-        // Add strategic delay for human-like behavior
-        await randomDelay(200 + Math.random() * 300);
-
-        const apiUrl = `https://www.practo.com/search/doctors?results_type=doctor&q=%5B%7B%22word%22%3A%22${encodeURIComponent(specialityName)}%22%2C%22autocompleted%22%3Atrue%2C%22category%22%3A%22subspeciality%22%7D%5D&city=${encodeURIComponent(cityName)}&page=${page}`;
-        
-        try {
-            const res = await gotScraping({
-                url: apiUrl,
-                headers: buildStealthHeaders('https://www.google.com'),
-                proxyUrl,
-                cookieJar,
-                http2: false,
-                timeout: { request: 25000 },
-                retry: {
-                    limit: 0, // We handle retries manually
-                },
-            });
-
-            if (res.statusCode === 403) {
-                log.warning(`API 403 on page ${page}, rotating strategy`);
-                return [];
-            }
-
-            const contentType = res.headers['content-type'] || '';
-            if (contentType.includes('application/json')) {
-                const body = typeof res.body === 'string' ? res.body : res.body.toString();
-                let parsed;
-                try {
-                    parsed = JSON.parse(body);
-                } catch {
-                    parsed = null;
-                }
-                if (parsed?.data?.length) {
-                    return parsed.data.map((item) => ({
-                        name: item.name || null,
-                        speciality: item.speciality || specialityName,
-                        experience: item.experience_years || null,
-                        location: item.locality || null,
-                        city: item.city || cityName,
-                        consultationFee: item.consultation_fee || null,
-                        rating: item.recommendation_score ? Number(item.recommendation_score) : null,
-                        url: toAbsoluteUrl(item.link || item.url),
-                        profileImage: toAbsoluteUrl(item.profile_picture),
-                        source: 'api',
-                    }));
-                }
-            }
-
-            // If not pure JSON, parse JSON-LD from HTML body.
-            const $ = cheerioLoad(res.body);
-            return parseJsonLdDoctors($);
-        } catch (err) {
-            log.debug(`API fetch error (retry ${retryCount}): ${err.message}`);
-            if (retryCount < 2) {
-                const delay = exponentialBackoffWithJitter(retryCount);
-                await new Promise(r => setTimeout(r, delay));
-                return fetchDoctorsViaApi({ cityName, specialityName, page, proxyUrl, cookieJar, retryCount: retryCount + 1 });
-            }
-            return [];
-        }
-    };
-
-    const makePageUrl = (currentUrl, page) => {
-        try {
-            const u = new URL(currentUrl);
-            u.searchParams.set('page', String(page));
-            return u.toString();
-        } catch {
-            return null;
-        }
-    };
-
-    const findNextPageUrl = ($, currentUrl, currentPage) => {
-        const relNext = $('a[rel="next"]').attr('href');
-        if (relNext) return toAbsoluteUrl(relNext);
-
-        const labeledNext = $('a:contains("Next"), a[aria-label="Next"]').not('.disabled').first().attr('href');
-        if (labeledNext) return toAbsoluteUrl(labeledNext);
-
-        const pageLink = $(`a[href*="page=${currentPage + 1}"]`).first().attr('href');
-        if (pageLink) return toAbsoluteUrl(pageLink);
-
-        const constructed = makePageUrl(currentUrl, currentPage + 1);
-        if (constructed) return constructed;
-
-        return null;
-    };
-
+    // Extract profile fields via selectors (requested by user).
     const parseDoctorDetail = ($, requestUrl) => {
         const description = clean($('p.c-profile__description').first().text());
         const profileImage = toAbsoluteUrl(
             $('img.c-profile__image').attr('src') || $('img.c-profile__image').attr('data-src'),
         );
 
-        if (description || profileImage) {
+        // Fallback: sometimes JSON-LD on profile contains image/description.
+        if (!description || !profileImage) {
+            const jsonDoctors = parseJsonLdDoctors($);
+            const best = jsonDoctors.find((d) => d.url && toDoctorKey(d.url) === toDoctorKey(requestUrl)) || jsonDoctors[0];
             return {
-                description: description || null,
-                profileImage: profileImage || null,
+                description: description || best?.description || null,
+                profileImage: profileImage || best?.profileImage || null,
             };
         }
 
-        const jsonDoctors = parseJsonLdDoctors($);
-        const best = jsonDoctors.find((d) => d.url && toDoctorKey(d.url) === toDoctorKey(requestUrl)) || jsonDoctors[0];
-        return {
-            description: best?.description || null,
-            profileImage: best?.profileImage || null,
-        };
+        return { description, profileImage };
     };
 
-    let saved = 0;
-    let enqueuedDetails = 0;
-    let requestCount = 0;
-    const lastRequestTime = { value: 0 };
+    const starting = [];
+    if (Array.isArray(startUrls) && startUrls.length) starting.push(...startUrls.map(normalizeUrlLike).filter(Boolean));
+    if (startUrl) starting.push(normalizeUrlLike(startUrl));
+    if (url) starting.push(normalizeUrlLike(url));
+    if (!starting.length) starting.push(buildSearchUrl({ cityName: city, specialityName: speciality, page: 1 }));
 
-    const pendingByKey = new Map();
+    // When profile pages block, we keep base records here and flush at the end.
+    const pendingByDoctorKey = new Map();
     const pushedKeys = new Set();
 
-    log.info(`🚀 Stealthy Mode: ${fetchDetails ? 'LIST + DETAIL' : 'LIST-only'}`);
-    log.info(`📊 Config: results=${resultsWanted} | maxPages=${maxPages} | concurrency=${maxConcurrency}`);
-    log.info(`🛡️ Protection: User-Agent rotation | Client hints | Session cycling | Smart backoff`);
+    let saved = 0;
+    let listPagesEnqueued = 0;
+    let detailPagesEnqueued = 0;
+    let detailPagesBlocked = 0;
+
+    // Prevent queue explosion (helps stealth and keeps LIST pages progressing).
+    const detailBacklogLimit = Math.max(20, maxConcurrency * 3);
+
+    const pushDoctor = async (doctor, doctorKey) => {
+        if (saved >= resultsWanted) return;
+        if (!doctorKey || pushedKeys.has(doctorKey)) return;
+        await Actor.pushData(doctor);
+        pushedKeys.add(doctorKey);
+        saved += 1;
+        if (saved % 10 === 0 || saved === resultsWanted) {
+            log.info(`Saved ${saved}/${resultsWanted}`);
+        }
+    };
+
+    log.info(`Mode=${fetchDetails ? 'LIST+DETAIL(best-effort)' : 'LIST-only'} results=${resultsWanted} maxPages=${maxPages} concurrency=${maxConcurrency}`);
 
     const crawler = new CheerioCrawler({
         proxyConfiguration,
         useSessionPool: true,
         persistCookiesPerSession: true,
+        maxConcurrency,
+        // Small delay reduces 403s significantly without killing throughput at concurrency ~10.
+        sameDomainDelaySecs: 0.2,
         autoscaledPoolOptions: {
             desiredConcurrency: maxConcurrency,
-            minConcurrency: Math.min(2, maxConcurrency),
-            maxConcurrency: maxConcurrency,
+            minConcurrency: Math.min(3, maxConcurrency),
         },
         maxRequestRetries: 3,
         requestHandlerTimeoutSecs: 60,
+        // Make headers look like a normal navigation from a referrer.
         preNavigationHooks: [
-            async ({ session, request }) => {
-                // Intelligent session retirement
-                if (request.retryCount >= 1) {
-                    if (session) session.markBad();
-                    log.debug(`⚠️ Session marked bad, retry ${request.retryCount}`);
-                }
-                
-                // Add exponential backoff to retried requests
-                if (request.retryCount > 0) {
-                    const delay = exponentialBackoffWithJitter(request.retryCount);
-                    await new Promise(r => setTimeout(r, delay));
-                    log.debug(`⏱️ Backoff: ${delay}ms after retry ${request.retryCount}`);
-                }
-                
-                // Random delay between requests
-                const now = Date.now();
-                const timeSinceLastRequest = now - lastRequestTime.value;
-                const minDelay = 500 + Math.random() * 1500;
-                if (timeSinceLastRequest < minDelay) {
-                    const waitTime = minDelay - timeSinceLastRequest;
-                    await new Promise(r => setTimeout(r, waitTime));
-                }
-                lastRequestTime.value = Date.now();
+            async ({ request, session }) => {
+                const referer = request.userData?.referer || 'https://www.google.com/';
+                request.headers = {
+                    ...baseHeaders,
+                    referer,
+                };
+
+                // If a request is already failing multiple times, rotate session sooner.
+                if (request.retryCount >= 2) session?.markBad();
             },
         ],
         failedRequestHandler: async ({ request }, error) => {
-            const errorMsg = error?.message || String(error);
-            if (errorMsg.includes('403')) {
-                log.warning(`🔒 403 BLOCKED: ${request.url}`);
-            } else if (errorMsg.includes('502') || errorMsg.includes('UPSTREAM')) {
-                log.warning(`📡 Proxy error: ${errorMsg}`);
-            } else {
-                log.warning(`❌ Failed: ${request.url} - ${errorMsg}`);
-            }
-        },
-        requestHandler: async ({ request, $, response, session, proxyInfo }) => {
             const label = request.userData?.label || 'LIST';
-            const pageNo = request.userData?.page ?? 1;
-
-            requestCount++;
-
-            if (response?.statusCode === 403) {
-                log.warning(`🔒 403 detected, bad session mark`);
-                if (session) session.markBad();
+            if (label === 'DETAIL') {
+                const doctorKey = request.userData?.doctorKey;
+                const base = doctorKey ? pendingByDoctorKey.get(doctorKey) : null;
+                if (doctorKey && base) {
+                    pendingByDoctorKey.delete(doctorKey);
+                    await pushDoctor(base, doctorKey);
+                }
+                log.debug(`Detail failed: ${request.url} (${error?.message || error})`);
                 return;
+            }
+            log.warning(`Request failed: ${request.url} (${error?.message || error})`);
+        },
+        requestHandler: async ({ request, $, response, session }) => {
+            const label = request.userData?.label || 'LIST';
+            const page = request.userData?.page ?? 1;
+
+            // LIST pages should be retried on blocks. DETAIL pages should degrade quickly.
+            if (response?.statusCode === 403 || response?.statusCode === 429) {
+                session?.markBad();
+                if (label === 'DETAIL') {
+                    detailPagesBlocked += 1;
+                    const doctorKey = request.userData?.doctorKey;
+                    const base = doctorKey ? pendingByDoctorKey.get(doctorKey) : null;
+                    if (doctorKey && base) {
+                        pendingByDoctorKey.delete(doctorKey);
+                        await pushDoctor(base, doctorKey);
+                    }
+                    return;
+                }
+                throw new Error(`Blocked (HTTP ${response.statusCode})`);
             }
 
             if (!$) {
-                log.warning(`⚠️ No HTML for ${request.url}`);
-                return;
+                if (label === 'DETAIL') {
+                    const doctorKey = request.userData?.doctorKey;
+                    const base = doctorKey ? pendingByDoctorKey.get(doctorKey) : null;
+                    if (doctorKey && base) {
+                        pendingByDoctorKey.delete(doctorKey);
+                        await pushDoctor(base, doctorKey);
+                    }
+                    return;
+                }
+                throw new Error('Missing HTML');
             }
 
             if (label === 'DETAIL') {
                 const doctorKey = request.userData?.doctorKey || toDoctorKey(request.url) || request.url;
-                if (pushedKeys.has(doctorKey)) return;
+                const base = pendingByDoctorKey.get(doctorKey) || { url: request.url, city, speciality };
 
-                const base = pendingByKey.get(doctorKey) || {
-                    url: request.url,
-                    city,
-                    speciality,
-                };
-
+                pendingByDoctorKey.delete(doctorKey);
                 const detail = parseDoctorDetail($, request.url);
-                const item = {
-                    ...base,
-                    ...detail,
-                    url: base.url || request.url,
-                };
-
-                pendingByKey.delete(doctorKey);
-
-                const outputKey = doctorKey;
-                if (!outputKey || pushedKeys.has(outputKey)) return;
-
-                await Actor.pushData(item);
-                pushedKeys.add(outputKey);
-                saved += 1;
-
-                if (saved % 5 === 0 || saved === resultsWanted) {
-                    log.info(`✅ Saved ${saved}/${resultsWanted} | Requests: ${requestCount}`);
-                }
+                await pushDoctor({ ...base, ...detail }, doctorKey);
                 return;
             }
 
-            // LIST handler: API first, HTML fallback
-            log.info(`📄 Processing LIST page ${pageNo}: ${request.url}`);
-            
-            let jsonDocs = [];
-            try {
-                jsonDocs = await fetchDoctorsViaApi({
-                    cityName: city,
-                    specialityName: speciality,
-                    page: pageNo,
-                    proxyUrl: proxyInfo?.url,
-                    cookieJar: session?.cookieJar,
-                });
-                if (jsonDocs.length > 0) {
-                    log.info(`📡 API success: ${jsonDocs.length} doctors`);
-                }
-            } catch (err) {
-                log.debug(`API fallback: ${err.message}`);
-            }
-
+            // LIST page: extract doctors (JSON-LD first, HTML fallback).
+            const jsonDocs = parseJsonLdDoctors($);
             const htmlDocs = parseHtmlDoctors($);
-            if (htmlDocs.length > 0) {
-                log.info(`🌐 HTML parsed: ${htmlDocs.length} doctors`);
-            }
-
             const merged = mergeDoctors(jsonDocs, htmlDocs).map((doc) => ({
                 ...doc,
                 city: doc.city || city,
@@ -519,79 +341,84 @@ await Actor.main(async () => {
 
             const filtered = applyFilters(merged);
             if (!filtered.length) {
-                log.info(`⚠️ No doctors after filtering on page ${pageNo}`);
+                log.info(`No doctors found on LIST page ${page}: ${request.url}`);
             }
 
-            if (!fetchDetails) {
-                const remaining = resultsWanted - saved;
-                const batch = filtered.slice(0, Math.max(0, remaining)).filter((doc) => {
-                    const key = toDoctorKey(doc.url) || doc.url || doc.name;
-                    if (!key || pushedKeys.has(key)) return false;
-                    pushedKeys.add(key);
-                    return true;
-                });
-                if (batch.length) {
-                    await Actor.pushData(batch);
-                    saved += batch.length;
-                    log.info(`✅ Saved ${batch.length} (total: ${saved}/${resultsWanted})`);
+            for (const doc of filtered) {
+                if (saved >= resultsWanted) break;
+                const doctorKey = toDoctorKey(doc.url) || doc.url || doc.name;
+                if (!doctorKey || pushedKeys.has(doctorKey)) continue;
+
+                // If detail enrichment is off (or backlog is too big), push listing data immediately.
+                if (!fetchDetails || pendingByDoctorKey.size >= detailBacklogLimit || !doc.url) {
+                    await pushDoctor(doc, doctorKey);
+                    continue;
                 }
-            } else {
-                for (const doc of filtered) {
-                    if (saved + enqueuedDetails >= resultsWanted) break;
-                    if (!doc.url) continue;
 
-                    const doctorKey = toDoctorKey(doc.url);
-                    if (!doctorKey) continue;
-                    if (pendingByKey.has(doctorKey) || pushedKeys.has(doctorKey)) continue;
-
-                    pendingByKey.set(doctorKey, {
-                        ...doc,
-                        url: doc.url,
-                        doctorKey,
-                    });
-
-                    enqueuedDetails += 1;
-                    await crawler.addRequests([{
-                        url: doc.url,
-                        uniqueKey: doctorKey,
-                        headers: buildStealthHeaders(request.url),
-                        userData: { label: 'DETAIL', doctorKey },
-                    }]);
+                // If we already have desired fields from listing, no need to fetch profile.
+                if (doc.description && doc.profileImage) {
+                    await pushDoctor(doc, doctorKey);
+                    continue;
                 }
+
+                // Enqueue profile page as best-effort. If it blocks, we will fall back to listing data.
+                pendingByDoctorKey.set(doctorKey, doc);
+                detailPagesEnqueued += 1;
+                await crawler.addRequests([{
+                    url: doc.url,
+                    uniqueKey: `DETAIL:${doctorKey}`,
+                    // Do not waste time on repeated 403s for profiles.
+                    maxRetries: 1,
+                    userData: { label: 'DETAIL', doctorKey, referer: request.url },
+                }]);
             }
 
-            if (saved >= resultsWanted || saved + enqueuedDetails >= resultsWanted) {
-                log.info(`🎯 Reached target results`);
-                return;
+            // Deterministic paging: enqueue next page URL (search endpoint).
+            if (saved < resultsWanted && page < maxPages) {
+                const nextUrl = buildSearchUrl({ cityName: city, specialityName: speciality, page: page + 1 });
+                listPagesEnqueued += 1;
+                await crawler.addRequests([{
+                    url: nextUrl,
+                    uniqueKey: `LIST:${city}:${speciality}:${page + 1}`,
+                    userData: { label: 'LIST', page: page + 1, referer: request.url },
+                }]);
             }
-            if (pageNo >= maxPages) {
-                log.info(`⏸️ Reached max pages limit`);
-                return;
-            }
-
-            const nextUrl = findNextPageUrl($, request.url, pageNo);
-            if (!nextUrl) {
-                log.info(`⏸️ No next page found`);
-                return;
-            }
-
-            log.info(`⬇️ Enqueuing page ${pageNo + 1}`);
-            await crawler.addRequests([{
-                url: nextUrl,
-                uniqueKey: `LIST:${nextUrl}`,
-                headers: buildStealthHeaders(request.url),
-                userData: { label: 'LIST', page: pageNo + 1 },
-            }]);
         },
     });
 
-    const initialRequests = initialUrls.filter(Boolean).map((u) => ({
-        url: u,
-        headers: buildStealthHeaders(),
-        userData: { label: 'LIST', page: 1 },
-    }));
+    // If users provide direct listing URLs, crawl them as LIST pages too.
+    // This keeps compatibility with existing inputs without relying on parsing the URL for parameters.
+    const initialRequests = [];
+    for (const u of starting.filter(Boolean)) {
+        const isSearch = u.includes('/search/doctors');
+        initialRequests.push({
+            url: u,
+            uniqueKey: isSearch ? `LIST:seed:${u}` : `LIST:seed:${toAbsoluteUrl(u)}`,
+            userData: { label: 'LIST', page: 1, referer: 'https://www.google.com/' },
+        });
+    }
 
-    log.info(`🌐 Starting from: ${initialRequests.map(r => r.url).join(', ')}`);
+    // If we were started from non-search URLs (e.g. /bangalore/urologist), also add the search URL seed.
+    if (!starting.some((u) => (u || '').includes('/search/doctors'))) {
+        initialRequests.push({
+            url: buildSearchUrl({ cityName: city, specialityName: speciality, page: 1 }),
+            uniqueKey: `LIST:${city}:${speciality}:1`,
+            userData: { label: 'LIST', page: 1, referer: 'https://www.google.com/' },
+        });
+    }
+
+    log.info(`Start URLs: ${initialRequests.map((r) => r.url).join(', ')}`);
     await crawler.run(initialRequests);
-    log.info(`✅ FINISHED! Extracted: ${saved} doctors in ${requestCount} requests`);
+
+    // Flush any remaining base records that could not be enriched due to blocks/timeouts.
+    if (saved < resultsWanted && pendingByDoctorKey.size) {
+        for (const [doctorKey, doc] of pendingByDoctorKey.entries()) {
+            if (saved >= resultsWanted) break;
+            await pushDoctor(doc, doctorKey);
+        }
+    }
+
+    log.info(`Finished: saved=${saved} listPagesEnqueued=${listPagesEnqueued} detailPagesEnqueued=${detailPagesEnqueued} detailBlocked=${detailPagesBlocked}`);
+    log.info('Options: set `fetchDetails: false` for fastest/most reliable runs; set proxy country to IN to improve profile success.');
 });
+
