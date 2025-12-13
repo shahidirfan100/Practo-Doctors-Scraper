@@ -230,6 +230,8 @@ await Actor.main(async () => {
     let listPagesEnqueued = 0;
     let detailPagesEnqueued = 0;
     let detailPagesBlocked = 0;
+    let stopRequested = false;
+    let crawler;
 
     // Prevent queue explosion (helps stealth and keeps LIST pages progressing).
     const detailBacklogLimit = Math.max(20, maxConcurrency * 3);
@@ -243,15 +245,25 @@ await Actor.main(async () => {
         if (saved % 10 === 0 || saved === resultsWanted) {
             log.info(`Saved ${saved}/${resultsWanted}`);
         }
+        if (saved >= resultsWanted && !stopRequested) {
+            stopRequested = true;
+            log.info('Reached results_wanted, stopping crawler early to avoid waiting on remaining detail timeouts.');
+            try {
+                crawler?.autoscaledPool?.abort();
+            } catch (err) {
+                log.debug(`Failed to abort autoscaled pool: ${err.message}`);
+            }
+        }
     };
 
     log.info(`Mode=${fetchDetails ? 'LIST+DETAIL(best-effort)' : 'LIST-only'} results=${resultsWanted} maxPages=${maxPages} concurrency=${maxConcurrency}`);
 
-    const crawler = new CheerioCrawler({
+    crawler = new CheerioCrawler({
         proxyConfiguration,
         useSessionPool: true,
         persistCookiesPerSession: true,
         maxConcurrency,
+        navigationTimeoutSecs: 25,
         // Small delay reduces 403s significantly without killing throughput at concurrency ~10.
         sameDomainDelaySecs: 0.2,
         autoscaledPoolOptions: {
@@ -288,6 +300,8 @@ await Actor.main(async () => {
             log.warning(`Request failed: ${request.url} (${error?.message || error})`);
         },
         requestHandler: async ({ request, $, response, session }) => {
+            if (stopRequested) return;
+
             const label = request.userData?.label || 'LIST';
             const page = request.userData?.page ?? 1;
 
@@ -368,7 +382,7 @@ await Actor.main(async () => {
                     url: doc.url,
                     uniqueKey: `DETAIL:${doctorKey}`,
                     // Do not waste time on repeated 403s for profiles.
-                    maxRetries: 1,
+                    maxRetries: 0,
                     userData: { label: 'DETAIL', doctorKey, referer: request.url },
                 }]);
             }
@@ -421,4 +435,3 @@ await Actor.main(async () => {
     log.info(`Finished: saved=${saved} listPagesEnqueued=${listPagesEnqueued} detailPagesEnqueued=${detailPagesEnqueued} detailBlocked=${detailPagesBlocked}`);
     log.info('Options: set `fetchDetails: false` for fastest/most reliable runs; set proxy country to IN to improve profile success.');
 });
-
